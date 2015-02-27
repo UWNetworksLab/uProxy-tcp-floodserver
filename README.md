@@ -5,7 +5,11 @@ Build it, and run ./server -h.  The buffer size controls how large the buffer gi
 very evenly, and wonder if you could get a higher transfer rate, try a larger buffer size.  If your variance in transfer rate
 is too high, then try a smaller one.  The default size is reasonable.  The max is 1 Gb.
 
-To test it, run it and then run:
+To test it, run it:
+```sh
+  $ ./server
+```
+And then run:
 ```sh
   $ nc localhost 1224 >/dev/null
 ```
