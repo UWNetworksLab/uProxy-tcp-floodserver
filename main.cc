@@ -89,13 +89,14 @@ double time_delta(const struct timespec& later,
 
 void output_stat(const Stat& stat);
 
-void loop (int accepted_sock) {
+void loop(int accepted_sock) {
   // write in out_buffer.size() blocks.
   Stat cur, prev;
   size_t len = out_buffer.size();
   uint64_t written = 0;
   struct timespec read_start, read_now;
-  printf("Accept sock %d\n", accepted_sock);
+  prev.snapshot(0);
+  prev.diff(prev);
   while (written >= 0) {
     output_stat(prev);
     clock_gettime(CLOCK_REALTIME, &read_start);
@@ -243,8 +244,11 @@ int main(int argc, char **argv) {
     perror("open /dev/urandom for buffer fill");
     exit(1);
   }
-  fread(&out_buffer[0], 1, bufsize, urandom);
+  printf("Reading random data into I/O buffer of size %d...", bufsize);
+  fflush(stdout);
+  fread(&out_buffer[0], bufsize, 1, urandom);
   fclose(urandom);
+  printf("done\n");
 
   // Status setup.
   if (filename != NULL) {
@@ -277,9 +281,6 @@ int main(int argc, char **argv) {
 
   // Open up, listen, and run an accept loop.
   printf("Listening to port %d\n", port);
-  printf(" Print status: %s, Stream status: %s\n",
-         opt_print_status ? "yes":"no",
-         opt_stream_status ? "yes":"no");
   int sock;
   if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
     perror("socket");
