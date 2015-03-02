@@ -1,5 +1,6 @@
 #include <getopt.h>
 #include <inttypes.h>
+#include <locale.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -11,7 +12,7 @@
 
 #include <iostream>
 #include <fstream>
-#include <string> 
+#include <string>
 #include <vector>
 
 struct Stat {
@@ -63,6 +64,7 @@ std::ofstream output_file;
 bool opt_has_output_file;
 bool opt_print_status;
 bool opt_stream_status;
+int64_t opt_max_output = INT64_MAX;
 double opt_update_interval_sec;
 
 const double kOneBillion = 1000000000.0;
@@ -93,23 +95,38 @@ void loop(int accepted_sock) {
   // write in out_buffer.size() blocks.
   Stat cur, prev;
   size_t len = out_buffer.size();
-  uint64_t written = 0;
+  int64_t written = 0;
   struct timespec read_start, read_now;
   prev.snapshot(0);
   prev.diff(prev);
-  while (written >= 0) {
+  while (written >= 0 && written < opt_max_output) {
     output_stat(prev);
     clock_gettime(CLOCK_REALTIME, &read_start);
     double dt;
     // snapshot at 2Hz
     do {
-      written += write(accepted_sock, &out_buffer[0], len);
+      int64_t write_len = std::min<int64_t>(len,
+                                            opt_max_output - written);
+      if (write_len > 0) {
+        int last_write = write(accepted_sock, &out_buffer[0], write_len);
+        if (last_write < 0) {
+          perror("write");
+          close(accepted_sock);
+          return;
+        }
+        written += last_write;
+      }
       clock_gettime(CLOCK_REALTIME, &read_now);
       dt = time_delta(read_now, read_start);
-    } while (dt < (kOneBillion * opt_update_interval_sec));
+    } while (dt < (kOneBillion * opt_update_interval_sec)
+             && written < opt_max_output);
     cur.snapshot(written);
     cur.diff(prev);
     prev = cur;
+  }
+  if (written >= opt_max_output) {
+    printf("\nFinished writing %'ld bytes\n", written);
+    exit(1);
   }
   close(accepted_sock);
 }
@@ -185,6 +202,9 @@ int main(int argc, char **argv) {
   int status_mode = 1;
   int port = 1224;
   opt_update_interval_sec = 1.0;
+  // hard-to-find requirement for linux (not solaris) to print
+  // thousands-separators in printf ("%'d");
+  setlocale(LC_ALL, "");
 
   do {
     static struct option long_options[] = {
@@ -194,11 +214,12 @@ int main(int argc, char **argv) {
       {"quiet",      no_argument,       &status_mode, 0 },
       {"interval",   required_argument, 0,            'i' },
       {"port",       required_argument, 0,            'p' },
+      {"max",        required_argument, 0,            'X' },
       {0,            0,                 0,            0 }
     };
     int option_index = 0;
 
-    c = getopt_long(argc, argv, "f:b:i:sp:qh", long_options,
+    c = getopt_long(argc, argv, "f:b:i:sp:qhX:", long_options,
                     &option_index);
     switch (c) {
     case -1:  // No more options, or getopt_long already did the work.
@@ -229,6 +250,15 @@ int main(int argc, char **argv) {
       if (opt_update_interval_sec < 0.001 || opt_update_interval_sec > 600) {
         printf("Invalid interval argument: %s\n", optarg);
         exit(1);
+      }
+    } break;
+    case 'X': {
+      opt_max_output = strtoll(optarg, NULL, 10);
+      if (opt_max_output < 0) {
+        printf("Invalid max-send argument: %s\n", optarg);
+        exit(1);
+      } else {
+        printf("Transmitting a max of %'ld bytes\n", opt_max_output);
       }
     } break;
     case 'h':
