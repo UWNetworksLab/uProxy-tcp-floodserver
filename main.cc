@@ -66,9 +66,10 @@ bool opt_print_status;
 bool opt_stream_status;
 int64_t opt_max_output = INT64_MAX;
 double opt_update_interval_sec;
-
-const double kOneBillion = 1000000000.0;
-const int64_t kOneBillionInt = 1000000000LL;
+int64_t opt_max_rate = INT64_MAX;  // output max:  bytes / sec.
+const double  kOneBillion    = 1000000000.0;
+const int64_t kOneBillionInt = 1000000000;
+const double kOneMillion = 1000000.0;
 
 double time_of(const struct timespec& t) {
   double d = t.tv_nsec;
@@ -81,12 +82,11 @@ double time_delta(const struct timespec& later,
                   const struct timespec& earlier) {
   int64_t nsec = later.tv_nsec - earlier.tv_nsec;
   int64_t sec = later.tv_sec - earlier.tv_sec;
-  if (nsec < 0.0) {
+  if (nsec < 0) {
     nsec += kOneBillionInt;
     sec -= 1;
   }
-  double dv = (sec * kOneBillionInt) + nsec;
-  return dv;
+  return sec + (static_cast<double>(nsec) / kOneBillion);
 }
 
 void output_stat(const Stat& stat);
@@ -96,17 +96,20 @@ void loop(int accepted_sock) {
   Stat cur, prev;
   size_t len = out_buffer.size();
   int64_t written = 0;
-  struct timespec read_start, read_now;
+  struct timespec write_start, write_now;
+  double delay = 0;
   prev.snapshot(0);
   prev.diff(prev);
   while (written >= 0 && written < opt_max_output) {
     output_stat(prev);
-    clock_gettime(CLOCK_REALTIME, &read_start);
-    double dt;
-    // snapshot at 2Hz
+    clock_gettime(CLOCK_REALTIME, &write_start);
+    double snapshot_dt;
+    // snapshot at 1/opt_update_interval_sec Hz.
     do {
       int64_t write_len = std::min<int64_t>(len,
                                             opt_max_output - written);
+      struct timespec write_begin;
+      clock_gettime(CLOCK_REALTIME, &write_begin);
       if (write_len > 0) {
         int last_write = write(accepted_sock, &out_buffer[0], write_len);
         if (last_write < 0) {
@@ -116,9 +119,21 @@ void loop(int accepted_sock) {
         }
         written += last_write;
       }
-      clock_gettime(CLOCK_REALTIME, &read_now);
-      dt = time_delta(read_now, read_start);
-    } while (dt < (kOneBillion * opt_update_interval_sec)
+      clock_gettime(CLOCK_REALTIME, &write_now);
+      if (delay > 0.0) {
+        usleep(delay * kOneMillion);
+      }
+      // snapshot_dt is for the snapshot time.  In seconds.
+      snapshot_dt = time_delta(write_now, write_start);
+      // write_dt is for this single write, for the throttle delay.  In seconds.
+      double write_dt = time_delta(write_now, write_begin);
+      // Recalculate our throttle-delay. Units are bytes and seconds.
+      // We add time between write(2)s to restrict our write-rate.
+      // write_len/(write_dt + delay) = opt_max_rate
+      // write_len = opt_max_rate*(write_dt + delay)
+      // write_len / opt_max_rate = write_dt + delay
+      delay = (write_len / static_cast<double>(opt_max_rate)) - write_dt;
+    } while (snapshot_dt < opt_update_interval_sec
              && written < opt_max_output);
     cur.snapshot(written);
     cur.diff(prev);
@@ -163,11 +178,11 @@ void output_stat(const Stat& stat) {
                 << "}\n";
   }
   if (opt_print_status) {
-    double delta_t = time_of(stat.now) - time_of(stat.prior);
+    double delta_t = time_delta(stat.now, stat.prior);
     double rate = stat.sent_last_interval / delta_t;
     char outbuf[81];
     int len = snprintf(outbuf, 80,
-                       "%12.3f: %s/sec (dt = %6.2f)",
+                       "% 12.3f: %s/sec (dt = %6.2f)",
                        time_of(stat.now), format_size(rate).c_str(), delta_t);
     splat(&outbuf[len], 80-len, ' ');
     outbuf[79] = opt_stream_status ? '\n' : '\r';
@@ -184,8 +199,10 @@ int usage(char *prog) {
          "  -b, --bufsize SIZE: size of buffer to write(2) to socket in loop.\n"
          "  -p, --port PORT: port number to serve on.\n"
          "  -i, --interval SECONDS: interval (floating-point) between status updates.\n"
+         "  -X, --max SIZE: maximum to write to a socket before auto-closing.\n"
+         "  -r, --rate SIZE: maximum bytes to write per second.\n"
          "  --quiet: do not print rate status messages.\n"
-         "  --statstream: do not overwrite own status message on console\n",
+         "  --statstream: do not overwrite own status message on console.\n",
          prog);
 }
 
@@ -215,11 +232,12 @@ int main(int argc, char **argv) {
       {"interval",   required_argument, 0,            'i' },
       {"port",       required_argument, 0,            'p' },
       {"max",        required_argument, 0,            'X' },
+      {"rate",       required_argument, 0,            'r' },
       {0,            0,                 0,            0 }
     };
     int option_index = 0;
 
-    c = getopt_long(argc, argv, "f:b:i:sp:qhX:", long_options,
+    c = getopt_long(argc, argv, "f:b:i:sp:qhX:r:", long_options,
                     &option_index);
     switch (c) {
     case -1:  // No more options, or getopt_long already did the work.
@@ -258,7 +276,18 @@ int main(int argc, char **argv) {
         printf("Invalid max-send argument: %s\n", optarg);
         exit(1);
       } else {
-        printf("Transmitting a max of %'ld bytes\n", opt_max_output);
+        printf("Transmitting a max of %'ld bytes before auto-closing socket.\n",
+               opt_max_output);
+      }
+    } break;
+    case 'r': {
+      opt_max_rate = strtoll(optarg, NULL, 10);
+      if (opt_max_rate < 0) {
+        printf("Invalid max-rate argument: %s\n", optarg);
+        exit(1);
+      } else {
+        printf("Transmitting at a maximum rate of %'ld bytes/sec.\n",
+               opt_max_rate);
       }
     } break;
     case 'h':
@@ -274,7 +303,7 @@ int main(int argc, char **argv) {
     perror("open /dev/urandom for buffer fill");
     exit(1);
   }
-  printf("Reading random data into I/O buffer of size %d...", bufsize);
+  printf("Reading random data into I/O buffer of %'d bytes...", bufsize);
   fflush(stdout);
   fread(&out_buffer[0], bufsize, 1, urandom);
   fclose(urandom);
