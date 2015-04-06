@@ -152,11 +152,11 @@ std::string format_size(uint64_t amount) {
   // that much better.
   char retbuf[128];
   if (amount > 1000000000LL) {
-    snprintf(retbuf, 128, "%4.2f Gb", d / 1000000000.0);
+    snprintf(retbuf, 128, "%4.2f GB", d / 1000000000.0);
   } else if (amount > 1000000) {
-    snprintf(retbuf, 128, "%4.2f Mb", d / 1000000.0);
+    snprintf(retbuf, 128, "%4.2f MB", d / 1000000.0);
   } else if (amount > 1000) {
-    snprintf(retbuf, 128, "%4.2f Kb", d / 1000.0);
+    snprintf(retbuf, 128, "%4.2f KB", d / 1000.0);
   } else {
     snprintf(retbuf, 128, "%lu byte", amount);
   }
